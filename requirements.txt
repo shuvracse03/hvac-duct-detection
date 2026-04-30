@@ -1,0 +1,28 @@
+# Core Dependencies for HVAC Duct Annotation Pipeline
+
+# Google Generative AI (Gemini API)
+google-generativeai>=0.3.0
+
+# Image Processing and PDF Handling
+Pillow>=10.0.0
+pdf2image>=1.16.3
+PyMuPDF>=1.23.0
+
+# Computer Vision (for alternative approaches)
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Optional: OCR Libraries (for reference/alternative implementations)
+# Uncomment if you want to use these for experimentation
+# paddleocr>=2.7.0
+# easyocr>=1.7.0
+# pytesseract>=0.3.10
+
+# Utilities
+pydantic>=2.0.0  # For data validation (optional, recommended for production)
+python-dotenv>=1.0.0  # For environment variable management
+
+# Development Dependencies (optional)
+# pytest>=7.4.0  # For testing
+# black>=23.0.0  # For code formatting
+# flake8>=6.0.0  # For linting
