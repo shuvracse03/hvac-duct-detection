@@ -1,0 +1,133 @@
+{
+    "0d0a5f7ad98b045431e4784db92e993839e338c7f0e2aa0f4aa4cefaf25a7cfa": {
+        "scale": "1/4\" = 1'-0\"",
+        "ducts": [
+            {
+                "text": "18\"\u00f8",
+                "type": "Return",
+                "pos": [
+                    265,
+                    301
+                ],
+                "dir": "H"
+            },
+            {
+                "text": "8\"\u00f8",
+                "type": "Supply",
+                "pos": [
+                    305,
+                    218
+                ],
+                "dir": "H"
+            },
+            {
+                "text": "12\"\u00f8",
+                "type": "Supply",
+                "pos": [
+                    305,
+                    273
+                ],
+                "dir": "H"
+            },
+            {
+                "text": "10\"\u00f8",
+                "type": "Supply",
+                "pos": [
+                    305,
+                    303
+                ],
+                "dir": "V"
+            },
+            {
+                "text": "8\"\u00f8",
+                "type": "Supply",
+                "pos": [
+                    390,
+                    203
+                ],
+                "dir": "H"
+            },
+            {
+                "text": "12\"\u00f8",
+                "type": "Supply",
+                "pos": [
+                    390,
+                    271
+                ],
+                "dir": "H"
+            },
+            {
+                "text": "7\"\u00f8",
+                "type": "Return",
+                "pos": [
+                    348,
+                    331
+                ],
+                "dir": "V"
+            },
+            {
+                "text": "14\"\u00f8",
+                "type": "Supply",
+                "pos": [
+                    348,
+                    348
+                ],
+                "dir": "H"
+            },
+            {
+                "text": "12\"\u00f8",
+                "type": "Supply",
+                "pos": [
+                    415,
+                    338
+                ],
+                "dir": "V"
+            },
+            {
+                "text": "22\"x14\"",
+                "type": "Supply",
+                "pos": [
+                    355,
+                    439
+                ],
+                "dir": "H"
+            },
+            {
+                "text": "10\"\u00f8",
+                "type": "Return",
+                "pos": [
+                    323,
+                    465
+                ],
+                "dir": "V"
+            },
+            {
+                "text": "10\"\u00f8",
+                "type": "Return",
+                "pos": [
+                    345,
+                    465
+                ],
+                "dir": "V"
+            },
+            {
+                "text": "14\"\u00f8",
+                "type": "Supply",
+                "pos": [
+                    305,
+                    574
+                ],
+                "dir": "H"
+            },
+            {
+                "text": "14\"\u00f8",
+                "type": "Supply",
+                "pos": [
+                    439,
+                    574
+                ],
+                "dir": "H"
+            }
+        ]
+    }
+}

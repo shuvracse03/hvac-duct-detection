@@ -1,154 +1,204 @@
+import cv2
+import numpy as np
+from pdf2image import convert_from_path
 import os
-import json
-import io
 import math
+import json
+import hashlib
+import io
+import re
 from google import genai
 from google.genai import types
-from pdf2image import convert_from_path
 from PIL import Image, ImageDraw, ImageFont
 
-# --- Production Configuration ---
-DPI = 400
-SCALE_RATIO = 1/4  # 1/4" = 1'-0"
-PIXELS_PER_FOOT = DPI * SCALE_RATIO 
-API_KEY = "YOUR_GEMINI_API_KEY_HERE"
+# --- Config ---
+DPI = 300
+API_KEY = "YOUR-GEMINI-API-KEY-HERE"
 MODEL_ID = "gemini-3-flash-preview"
+CACHE_FILE = "vlm_cache.json"
 
-class HVACDuctAnalyzer:
-    """Handles the Vision-Language Model interface for engineering extraction."""
+def get_line_params(p1, p2):
+    """Calculates angle and midpoint for collinearity checks[cite: 1]."""
+    angle = math.atan2(p2[1] - p1[1], p2[0] - p1[0])
+    return angle % np.pi, ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
+
+def clean_and_group_lines(candidates, dist_thresh=110, angle_thresh=np.pi/45):
+    """Merges redundant segments into single continuous centerlines[cite: 1]."""
+    if not candidates: return []
+    candidates.sort(key=lambda x: math.sqrt((x[1][0]-x[0][0])**2 + (x[1][1]-x[0][1])**2), reverse=True)
+    
+    merged = []
+    used = [False] * len(candidates)
+    for i in range(len(candidates)):
+        if used[i]: continue
+        group = [candidates[i]]
+        used[i] = True
+        ref_ang, ref_mid = get_line_params(candidates[i][0], candidates[i][1])
+        
+        for j in range(i + 1, len(candidates)):
+            if used[j]: continue
+            test_ang, test_mid = get_line_params(candidates[j][0], candidates[j][1])
+            if abs(ref_ang - test_ang) < angle_thresh:
+                d = math.sqrt((ref_mid[0] - test_mid[0])**2 + (ref_mid[1] - test_mid[1])**2)
+                if d < dist_thresh:
+                    cross_dist = abs((test_mid[0] - ref_mid[0]) * math.sin(ref_ang) - 
+                                     (test_mid[1] - ref_mid[1]) * math.cos(ref_ang))
+                    if cross_dist < 8:
+                        group.append(candidates[j])
+                        used[j] = True
+
+        pts = np.array([p for line in group for p in line], dtype=np.float32)
+        [vx, vy, x0, y0] = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
+        vx, vy, x0, y0 = vx.item(), vy.item(), x0.item(), y0.item()
+        projections = [(p[0] - x0) * vx + (p[1] - y0) * vy for p in pts]
+        min_p = [int(x0 + min(projections) * vx), int(y0 + min(projections) * vy)]
+        max_p = [int(x0 + max(projections) * vx), int(y0 + max(projections) * vy)]
+        merged.append([min_p, max_p])
+    return merged
+
+class HVACOmniTool:
     def __init__(self, api_key):
         self.client = genai.Client(api_key=api_key)
+        self.cache = self._load_cache()
 
-    def get_analysis(self, image_bytes):
-        """Robust prompting to ensure precise engineering data extraction."""
+    def _load_cache(self):
+        """Loads analysis results to prevent redundant API calls[cite: 2]."""
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, 'r') as f:
+                try: return json.load(f)
+                except: return {}
+        return {}
+
+    def get_vlm_analysis(self, image_bytes):
+        """Extracts scale and specific duct dimensions with error handling[cite: 2]."""
+        img_hash = hashlib.sha256(image_bytes).hexdigest()
+        if img_hash in self.cache: return self.cache[img_hash]
+
         prompt = (
-            "You are a Senior Mechanical Engineer. Analyze this HVAC Mechanical Floor Plan. "
-            "Identify all duct segments (Supply, Return, Exhaust). "
-            "Accurately extract the duct dimensions (e.g., 12\"ø or 22x14). "
-            "Ducts can be rotated(like 45 degree, 90 degree, 135 rotation) or horizontal in any direction, and labels may be rotated. "
-            "Duct annotations may be small and require careful attention to detail. They can be rotated in anti-clockwise 90 degree too."
-            "Don't miss any duct annotation, as even a single missed 4\"ø or 6\"ø label can lead to significant errors in the final design. "
-            "Duct lines are represented by pairs of parallel lines. The centerline runs exactly between them. Annotations are always inside two parallel duct walls. "
-            "Ducts are the nearest pair of parallel lines to the detected annotation/label's center point. Usually duct walls are in deep black or gray color. "
-            "For each segment, extract:\n"
-            "1. Dimension: Format as 'Width x Height' or 'Diameter' (e.g., '12x10' or '10ø').\n"
-            "2. Type: 'Supply', 'Return', or 'Exhaust' based on drawing notes.\n"
-            "3. Geometry: Start and End coordinates of the center line in [y, x] format (0-1000 scale).\n\n"  "Return ONLY a JSON list: "
-            "[{\"dim\": string, \"type\": string, \"start\": [y,x], \"end\": [y,x]}]"
+            "Analyze this HVAC Plan: 1. Extract scale (e.g. 1/4\"=1'-0\")[cite: 3]. "
+            "2. Identify duct dimension annotations (e.g., 12x10, 18\" phi) and their locations[cite: 2]. "
+            "Return JSON format: {\"scale\": \"\", \"labels\": [{\"text\":\"\", \"type\":\"Supply/Return/Exhaust\",  \"pos\":[y,x]}]}"
         )
-        
         response = self.client.models.generate_content(
             model=MODEL_ID,
             contents=[types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        return json.loads(response.text)
+        result = json.loads(response.text)
+        self.cache[img_hash] = result
+        with open(CACHE_FILE, 'w') as f: json.dump(self.cache, f, indent=4)
+        return result
 
-class DrawingProcessor:
-    """Manages coordinate transformation, visualization, and JSON reporting."""
-    def __init__(self, image):
-        self.image = image
-        self.draw = ImageDraw.Draw(image)
-        self.width, self.height = image.size
-        self.json_report = []
-        # Define color mapping for consistency
-        self.color_map = {
-            "Supply": "#0000FF",  # Blue
-            "Return": "#FF0000",  # Red
-            "Exhaust": "#FF0000", # Red (grouped with return for this assignment)
-            "Default": "#0000FF"  # Fallback to Blue
-        }
+def process_hvac_assignment(pdf_path):
+    images = convert_from_path(pdf_path, dpi=DPI)
+    pil_img = images[0]
+    img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
 
-    def _to_pixel_coords(self, norm_coords):
-        """Maps 0-1000 AI coordinates to physical image pixels."""
-        return (norm_coords[1] * self.width / 1000, norm_coords[0] * self.height / 1000)
-
-    def _get_scaled_length(self, p1_norm, p2_norm):
-        """Calculates actual distance in feet using the drawing scale."""
-        p1 = self._to_pixel_coords(p1_norm)
-        p2 = self._to_pixel_coords(p2_norm)
-        pixel_dist = math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
-        return round(pixel_dist / PIXELS_PER_FOOT, 2)
-
-    def _load_best_font(self, size):
-        """Attempts to load a professional sans-serif font."""
-        font_paths = [
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "C:\\Windows\\Fonts\\arial.ttf",
-            "/Library/Fonts/Arial.ttf"
-        ]
-        for path in font_paths:
-            if os.path.exists(path):
-                return ImageFont.truetype(path, size)
-        return ImageFont.load_default()
-
-    def apply_annotations(self, ai_data):
-        """Renders color-coded lines and dimension labels based on duct type."""
-        font = self._load_best_font(60) 
-        legend_font = self._load_best_font(55)
-
-        for duct in ai_data:
-            p1 = self._to_pixel_coords(duct['start'])
-            p2 = self._to_pixel_coords(duct['end'])
-            length = self._get_scaled_length(duct['start'], duct['end'])
-            
-            # Determine color based on duct type
-            duct_type = duct.get('type', 'Default')
-            color = self.color_map.get(duct_type, self.color_map['Default'])
-            
-            # 1. Draw straight duct line in specified color
-            self.draw.line([p1, p2], fill=color, width=12)
-
-            # 2. Large Annotation in matching color (No box)[cite: 5]
-            label = f"{duct['dim']} (L: {length}')"
-            mid_x = (p1[0] + p2[0]) / 2
-            mid_y = ((p1[1] + p2[1]) / 2) - 60 
-            
-            self.draw.text((mid_x, mid_y), label, fill=color, font=font, anchor="mm")
-
-            # 3. Store data for JSON output[cite: 5]
-            self.json_report.append({
-                "specification": duct['dim'],
-                "length_feet": length,
-                "start": p1,
-                "end": p2,
-                "type": duct_type
-            })
-
-        self._render_legend(legend_font)
-
-    def _render_legend(self, font):
-        """Adds a multi-color legend to the bottom of the drawing[cite: 5]."""
-        start_y = self.height - 250
-        margin_x = 100
-        
-        # Draw legend entries with corresponding colors[cite: 5]
-        self.draw.text((margin_x, start_y), "COLOR LEGEND:", fill="black", font=font)
-        self.draw.text((margin_x, start_y + 70), "■ BLUE: Supply Ducts", fill=self.color_map["Supply"], font=font)
-        self.draw.text((margin_x, start_y + 140), "■ RED: Return / Exhaust Ducts", fill=self.color_map["Return"], font=font)
-
-    def export_results(self):
-        """Finalizes the PNG drawing and the duct list JSON."""
-        self.image.save("final_annotated_hvac.png")
-        with open("duct_list.json", "w") as f:
-            json.dump(self.json_report, f, indent=4)
-
-# --- Execution ---
-def main():
-    print("Processing HVAC Drawing with type-based color coding...")
-    pages = convert_from_path("testset2.pdf", dpi=DPI)
-    input_img = pages[0]
+    # 1. Background Cleaning (Logic from line_finder.py)[cite: 1]
+    xp, fp = [0, 45, 65, 255], [0, 0, 255, 255]
+    lut = np.interp(np.arange(256), xp, fp).astype('uint8')
+    img_contrast = cv2.LUT(gray, lut)
+    _, binary = cv2.threshold(img_contrast, 220, 255, cv2.THRESH_BINARY_INV)
     
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.rectangle(mask, (int(w*0.04), int(h*0.04)), (int(w*0.84), int(h*0.65)), 255, -1)
+    binary_roi = cv2.bitwise_and(binary, mask)
+
+    lines = cv2.HoughLinesP(binary_roi, 1, np.pi/180, threshold=90, minLineLength=130, maxLineGap=15)
+    candidates = []
+    if lines is not None:
+        for i in range(len(lines)):
+            l1 = lines[i][0]
+            for j in range(i + 1, len(lines)):
+                l2 = lines[j][0]
+                ang1, ang2 = math.atan2(l1[3]-l1[1], l1[2]-l1[0]), math.atan2(l2[3]-l2[1], l2[2]-l2[0])
+                if abs(ang1 - ang2) < (np.pi / 120): 
+                    m1, m2 = ((l1[0]+l1[2])/2, (l1[1]+l1[3])/2), ((l2[0]+l2[2])/2, (l2[1]+l2[3])/2)
+                    dist = math.sqrt((m1[0]-m2[0])**2 + (m1[1]-m2[1])**2)
+                    if 25 < dist < 210:
+                        candidates.append([[int((l1[0]+l2[0])/2), int((l1[1]+l2[1])/2)], 
+                                          [int((l1[2]+l2[2])/2), int((l1[3]+l2[3])/2)]])
+
+    final_lines = clean_and_group_lines(candidates)
+
+    # 2. VLM Dimension Extraction (Logic from annotation_maker.py)[cite: 2]
     buf = io.BytesIO()
-    input_img.save(buf, format='JPEG')
+    pil_img.save(buf, format='JPEG')
+    tool = HVACOmniTool(API_KEY)
+    vlm_data = tool.get_vlm_analysis(buf.getvalue())
     
-    analyzer = HVACDuctAnalyzer(API_KEY)
-    results = analyzer.get_analysis(buf.getvalue())
+    scale_str = vlm_data.get('scale', '1/4')
+    match = re.search(r"(\d+)/(\d+)", scale_str)
+    ppf = (DPI * (int(match.group(1))/int(match.group(2)))) if match else DPI*0.25
+
+    # 3. Double Annotation Strategy[cite: 1, 2]
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 255, 255), (255, 0, 255)]
+    line_json = []
+
+    # FIX: Use .get() to avoid KeyError if 'labels' is missing or named differently[cite: 2]
+    duct_labels = vlm_data.get('labels', vlm_data.get('ducts', []))
+    # 3. PIL-based Rendering for Phi Symbol Support
+    img_pil = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img_pil)
     
-    processor = DrawingProcessor(input_img)
-    processor.apply_annotations(results)
-    processor.export_results()
-    print("Done. Outputs saved: final_annotated_hvac.png and duct_list.json")
+    font_paths = [
+    "C:\\Windows\\Fonts\\arial.ttf",           # Windows
+    "/Library/Fonts/Arial.ttf",                # macOS
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", # Linux
+    "arial.ttf"                                # Local folder fallback
+    ]
+
+    font_size = 40
+    font = None
+
+    for path in font_paths:
+      if os.path.exists(path):
+        font = ImageFont.truetype(path, font_size)
+        break
+
+    if font is None:
+      print("Warning: TrueType font not found. Falling back to tiny default font.")
+      font = ImageFont.load_default()
+
+    for label in duct_labels:
+        lx = int(label['pos'][1] * w / 1000)
+        ly = int(label['pos'][0] * h / 1000)
+        # Determine S/E/R suffix[cite: 2]
+        d_type = label.get('type', 'Unknown')[0].upper() 
+        print(label['text'])
+        print('===========================')
+        #clean_text = label['text'].replace("phi", "D").replace("\u03c6", "D")
+        display_text = f"{label['text']} ({d_type})"
+
+        draw.text((lx, ly-40), display_text, font=font, fill=(255, 0, 0))
+
+    # Convert back to CV for line drawing[cite: 1]
+    img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    line_json = []
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 255, 255), (255, 0, 255)]
+
+    # Annotation: Line IDs and Lengths in format ID(Length)[cite: 1]
+    for idx, line in enumerate(final_lines):
+        line_id = idx + 1
+        px_len = math.sqrt((line[1][0]-line[0][0])**2 + (line[1][1]-line[0][1])**2)
+        if px_len < 110: continue
+        
+        ft_len = round(px_len / ppf, 1)
+        color = colors[idx % len(colors)]
+        
+        cv2.line(img_cv, tuple(line[0]), tuple(line[1]), color, 8)
+        
+        mid_x, mid_y = (line[0][0] + line[1][0]) // 2, (line[0][1] + line[1][1]) // 2
+        cv2.putText(img_cv, f"{line_id}", (mid_x, mid_y - 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+        
+        line_json.append({"id": line_id, "length": f"{ft_len}'", "coords": line})
+
+    cv2.imwrite("final_assignment_output.png", img_cv)
+    with open("duct_lines.json", "w") as f:
+        json.dump(line_json, f, indent=4)
 
 if __name__ == "__main__":
-    main()
+    process_hvac_assignment("testset2.pdf")
